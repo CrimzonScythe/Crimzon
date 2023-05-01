@@ -14,6 +14,14 @@ import wikipediaapi
 import aiosqlite
 import asyncio
 import sqlite3
+from cachetools import TTLCache
+from bs4 import BeautifulSoup
+import requests
+import json
+from urllib.parse import quote
+from dotenv import load_dotenv
+
+
 
 # Leveling system
 xp_per_message = 5
@@ -24,13 +32,14 @@ recent_messages = {}  # key: user_id, value: list of message timestamps
 
 
 polls = defaultdict(dict)
+load_dotenv()
     # Load environment variables
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
     # Configure the OpenAI API client
 openai.api_key = OPENAI_API_KEY
-
+RIOT_API_KEY = os.getenv('RIOT_API_KEY')
 GIPHY_API_KEY = os.environ.get("GIPHY_API_KEY")
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
@@ -46,8 +55,13 @@ intents.typing = False
 intents.presences = False
 intents.message_content = True
 
+# Rate limiting and caching
+cache = TTLCache(maxsize=100, ttl=3600)
+
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.remove_command("help")
+
 
 async def fetch_random_exercise():
     url = "https://wger.de/api/v2/exercise/?format=json&language=2&limit=1&offset=" + str(random.randint(1, 300))
@@ -161,6 +175,8 @@ async def wine(ctx):
     wine_name = random_wine["name"]
     wine_origin = random_wine["origin"]
     await ctx.send(f"Wine recommendation: {wine_name}\nOrigin: {wine_origin}")
+    
+    
 
 
 @bot.command(name="cocktail")
@@ -240,6 +256,327 @@ def parse_duration(duration_str):
     # Helper function
 def find_member(ctx, member_str):
     return discord.utils.find(lambda m: m.name.lower() == member_str.lower(), ctx.guild.members)
+    
+@bot.command(name='freechamps')
+async def freechamps_command(ctx):
+    free_champion_rotation = get_free_champion_rotation()
+    if free_champion_rotation:
+        response_text = f"Current Free Champion Rotation:\n{free_champion_rotation}"
+        await ctx.send(response_text)
+    else:
+        await ctx.send("Could not find the current free champion rotation")
+
+def get_free_champion_rotation():
+    region = "na1"  # Change this based on the desired region
+    free_champ_url = f"https://{region}.api.riotgames.com/lol/platform/v3/champion-rotations?api_key={RIOT_API_KEY}"
+    free_champ_response = requests.get(free_champ_url)
+
+    if free_champ_response.status_code != 200:
+        return None
+
+    free_champ_data = free_champ_response.json()
+    free_champion_ids = free_champ_data["freeChampionIds"]
+    free_champion_names = [champion_id_to_name(champion_id) for champion_id in free_champion_ids]
+
+    return ", ".join(free_champion_names)
+	
+@bot.command(name='matchhistory')
+async def matchhistory_command(ctx, *, summoner_name: str):
+    match_history = get_match_history(summoner_name)
+    if match_history:
+        response_text = f"Match History for {summoner_name}:\n{match_history}"
+        await ctx.send(response_text)
+    else:
+        await ctx.send(f"Could not find match history for '{summoner_name}'")
+
+def get_match_history(summoner_name: str):
+    account_id = get_account_id(summoner_name)
+    if not account_id:
+        return None
+
+    region = "na1"  # Change this based on the desired region
+    match_history_url = f"https://{region}.api.riotgames.com/lol/match/v4/matchlists/by-account/{account_id}?api_key={RIOT_API_KEY}"
+    match_history_response = requests.get(match_history_url)
+
+    if match_history_response.status_code != 200:
+        return None
+
+    match_history_data = match_history_response.json()
+    matches = match_history_data["matches"]
+
+    formatted_matches = "\n".join(
+        [
+            f"{index+1}. Game Mode: {match['queue']} | Champion: {champion_id_to_name(match['champion'])} | Timestamp: {match['timestamp']}"
+            for index, match in enumerate(matches[:10])  # Limit to the last 10 matches
+        ]
+    )
+
+    return formatted_matches
+
+def get_account_id(summoner_name: str):
+    region = "na1"  # Change this based on the desired region
+    summoner_url = f"https://{region}.api.riotgames.com/lol/summoner/v4/summoners/by-name/{summoner_name}?api_key={RIOT_API_KEY}"
+    summoner_response = requests.get(summoner_url)
+
+    if summoner_response.status_code != 200:
+        return None
+
+    summoner_data = summoner_response.json()
+    return summoner_data["accountId"]
+
+
+@bot.command(name='tierlist')
+async def tierlist_command(ctx):
+    tier_list = get_tier_list()
+    if tier_list:
+        response_text = f"Current Tier List:\n{tier_list}"
+        await ctx.send(response_text)
+    else:
+        await ctx.send("Could not fetch the tier list.")
+
+def get_tier_list():
+    url = "https://www.leagueofgraphs.com/champions/overview"
+    response = requests.get(url)
+
+    if response.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    tier_list_sections = soup.find_all("div", {"class": "medium-6"})
+
+    if not tier_list_sections:
+        return None
+
+    formatted_tier_list = ""
+    for section in tier_list_sections:
+        role_title = section.find("h3")
+        if not role_title:
+            continue
+
+        role = role_title.text.strip()
+        champions = section.find_all("div", {"class": "championBox"})
+
+        tier_champions = [
+            f"{index + 1}. {champion.find('div', {'class': 'name'}).text.strip()} - Win Rate: {champion.find('div', {'class': 'winRate'}).text.strip()}"
+            for index, champion in enumerate(champions)
+        ]
+
+        formatted_tier_list += f"{role}:\n" + "\n".join(tier_champions) + "\n\n"
+
+    return formatted_tier_list.strip()
+
+
+
+@bot.command(name='counters')
+async def counters_command(ctx, *, champion_name: str):
+    counters = get_champion_counters(champion_name.lower())
+    if counters:
+        response_text = f"Counters for {champion_name.capitalize()}:\n{counters}"
+        await ctx.send(response_text)
+    else:
+        await ctx.send(f"Could not find counters for '{champion_name}'")
+
+def get_champion_counters(champion_name: str):
+    url = f"https://www.leagueofgraphs.com/en/champions/counters/{champion_name.lower()}/all"
+    response = requests.get(url)
+
+    if response.status_code != 200:
+        return None
+
+    start_index = response.text.find("data: ") + 6
+    end_index = response.text.find("\n", start_index) - 1
+    json_data = response.text[start_index:end_index]
+    counters_data = json.loads(json_data)
+
+    formatted_counters = "\n".join(
+        [
+            f"{index + 1}. {counter['champion']} - Win Rate: {counter['winRate']}%, Matches: {counter['matchNumber']}"
+            for index, counter in enumerate(counters_data)
+        ]
+    )
+
+    return formatted_counters
+
+
+@bot.command(name='esports')
+async def esports_command(ctx):
+    esports_matches = get_esports_matches()
+    if esports_matches:
+        response_text = f"Upcoming and Ongoing eSports Matches:\n{esports_matches}"
+        await ctx.send(response_text)
+    else:
+        await ctx.send("No upcoming or ongoing eSports matches found")
+
+def get_esports_matches():
+    PANDASCORE_API_KEY = os.getenv("PANDASCORE_API_KEY")
+    url = f"https://api.pandascore.co/lol/matches/upcoming_and_running?token={PANDASCORE_API_KEY}"
+    response = requests.get(url)
+
+    if response.status_code != 200:
+        return None
+
+    matches_data = response.json()
+    formatted_matches = "\n".join(
+        [
+            f"{match['name']} - {match['league']['name']} ({match['scheduled_at']})"
+            for match in matches_data
+        ]
+    )
+
+    return formatted_matches
+
+	
+@bot.command(name='patchnotes')
+async def patchnotes_command(ctx):
+    latest_patch_notes_url = get_latest_patch_notes_url()
+    if latest_patch_notes_url:
+        response_text = f"Latest Patch Notes: {latest_patch_notes_url}"
+        await ctx.send(response_text)
+    else:
+        await ctx.send("Could not find the latest patch notes")
+
+def get_latest_patch_notes_url():
+    base_url = "https://na.leagueoflegends.com"
+    patch_notes_url = f"{base_url}/en-us/news/game-updates/"
+
+    response = requests.get(patch_notes_url)
+    if response.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    patch_notes_links = soup.find_all("a", class_="style--preview-card")
+
+    if not patch_notes_links:
+        return None
+
+    latest_patch_notes_url = base_url + patch_notes_links[0]["href"]
+    return latest_patch_notes_url
+	
+@bot.command(name='champion')
+async def champion_command(ctx, *, champion_name: str):
+    champion_data = get_champion_data(champion_name.lower())
+    if champion_data:
+        response_text = format_champion_data(champion_data)
+        await ctx.send(response_text)
+    else:
+        await ctx.send(f"Could not find champion '{champion_name}'")
+
+def load_champion_data():
+    with open("data/champion.json", "r", encoding="utf-8") as file:
+        data = json.load(file)
+        return data["data"]
+		
+@bot.command(name='livegame')
+async def livegame_command(ctx, *, summoner_name: str):
+    live_game_data = get_live_game_data(summoner_name)
+    if live_game_data:
+        response_text = format_live_game_data(live_game_data)
+        await ctx.send(response_text)
+    else:
+        await ctx.send(f"No live game found for summoner '{summoner_name}'")
+		
+def champion_id_to_name(champion_id: int):
+    for champion_key, champion_info in champion_data_cache.items():
+        if int(champion_info["key"]) == champion_id:
+            return champion_info["name"]
+    return "Unknown"
+
+
+def get_live_game_data(summoner_name: str):
+    summoner_data = get_summoner_data(summoner_name)
+    if not summoner_data:
+        return None
+
+    region = "na1"  # Change this based on the desired region
+    summoner_id = summoner_data["id"]
+    live_game_url = f"https://{region}.api.riotgames.com/lol/spectator/v4/active-games/by-summoner/{summoner_id}?api_key={RIOT_API_KEY}"
+    live_game_response = requests.get(live_game_url)
+
+    if live_game_response.status_code != 200:
+        return None
+
+    return live_game_response.json()
+
+def format_live_game_data(live_game_data: dict):
+    game_mode = live_game_data["gameMode"]
+    game_length = live_game_data["gameLength"] // 60
+
+    participants = live_game_data["participants"]
+    formatted_participants = "\n".join(
+        [f"{participant['summonerName']} ({champion_id_to_name(participant['championId'])})" for participant in participants]
+    )
+
+    response_text = f"Live Game - {game_mode}\nDuration: {game_length} minutes\n\nParticipants:\n{formatted_participants}"
+    return response_text
+
+
+
+champion_data_cache = load_champion_data()
+
+def get_champion_data(champion_name: str):
+    for champion_key, champion_info in champion_data_cache.items():
+        if champion_info["name"].lower() == champion_name:
+            return champion_info
+    return None
+
+def format_champion_data(champion_data: dict):
+    title = champion_data["title"]
+    name = champion_data["name"]
+    passive = champion_data["passive"]
+    abilities = champion_data["spells"]
+
+    formatted_abilities = "\n\n".join(
+        [f"{ability['name']} ({ability['key']}): {ability['description']}" for ability in abilities]
+    )
+
+    response_text = f"{name}, {title}\n\nPassive: {passive['name']} - {passive['description']}\n\nAbilities:\n\n{formatted_abilities}"
+    return response_text
+	
+@bot.command(name='summoner')
+async def summoner_command(ctx, *, summoner_name: str):
+    summoner_data = get_summoner_data(summoner_name)
+    if summoner_data:
+        response_text = f"Summoner '{summoner_name}' has level {summoner_data['summonerLevel']} and is ranked {summoner_data['tier']} {summoner_data['rank']} with {summoner_data['leaguePoints']} LP in Solo/Duo."
+        await ctx.send(response_text)
+    else:
+        await ctx.send(f"Could not find summoner '{summoner_name}'")
+
+def get_summoner_data(summoner_name: str):
+    region = "na1"  # Change this based on the desired region
+    summoner_url = f"https://{region}.api.riotgames.com/lol/summoner/v4/summoners/by-name/{summoner_name}?api_key={RIOT_API_KEY}"
+    summoner_response = requests.get(summoner_url)
+
+    if summoner_response.status_code != 200:
+        return None
+
+    summoner_data = summoner_response.json()
+    summoner_id = summoner_data["id"]
+
+    league_url = f"https://{region}.api.riotgames.com/lol/league/v4/entries/by-summoner/{summoner_id}?api_key={RIOT_API_KEY}"
+    league_response = requests.get(league_url)
+
+    if league_response.status_code != 200:
+        return None
+
+    league_data = league_response.json()
+    solo_duo_data = None
+
+    for entry in league_data:
+        if entry["queueType"] == "RANKED_SOLO_5x5":
+            solo_duo_data = entry
+            break
+
+    if solo_duo_data:
+        summoner_data["tier"] = solo_duo_data["tier"]
+        summoner_data["rank"] = solo_duo_data["rank"]
+        summoner_data["leaguePoints"] = solo_duo_data["leaguePoints"]
+    else:
+        summoner_data["tier"] = "Unranked"
+        summoner_data["rank"] = ""
+        summoner_data["leaguePoints"] = 0
+
+    return summoner_data
+
 
 @bot.command(name="create_poll")
 async def create_poll(ctx, question: str, *options: str):
